@@ -13,7 +13,24 @@ image = (
     .add_local_python_source("pipeline")
 )
 
+diarize_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("ffmpeg")
+    .pip_install("pyannote.audio>=4.0,<5", "numpy")
+    .env({"HF_HOME": "/models/hf"})
+    .add_local_python_source("pipeline")
+)
+
 models = modal.Volume.from_name("bgt-models", create_if_missing=True)
+
+
+def decode_bytes(data: bytes, filename: str):
+    from pipeline.decode import load_audio
+
+    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1]) as f:
+        f.write(data)
+        f.flush()
+        return load_audio(f.name)
 
 
 @app.cls(image=image, gpu="A10G", volumes={"/models": models}, scaledown_window=120)
@@ -26,13 +43,23 @@ class Transcriber:
     @modal.method()
     def run(self, data: bytes, filename: str) -> list[dict]:
         from pipeline.asr import transcribe
-        from pipeline.decode import load_audio
 
-        with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1]) as f:
-            f.write(data)
-            f.flush()
-            audio = load_audio(f.name)
-        return transcribe(self.model, audio)
+        return transcribe(self.model, decode_bytes(data, filename))
+
+
+@app.cls(image=diarize_image, gpu="T4", volumes={"/models": models},
+         secrets=[modal.Secret.from_name("huggingface-secret")], scaledown_window=120)
+class Diarizer:
+    @modal.enter()
+    def load(self):
+        from pipeline.diarize import load_pipeline
+        self.pipeline = load_pipeline(os.environ["HF_TOKEN"])
+
+    @modal.method()
+    def run(self, data: bytes, filename: str, exclusive: bool = False) -> list[dict]:
+        from pipeline.diarize import diarize
+
+        return diarize(self.pipeline, decode_bytes(data, filename), exclusive=exclusive)
 
 
 @app.local_entrypoint()
