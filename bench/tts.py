@@ -6,9 +6,10 @@ A speaker without "voice" is cast from <voices>/index.json: a person of the spea
 in the dialog, rotating through all of that person's references. The cast is saved as cast.json next to the lines.
 The dialog's optional "tts" block overrides the OmniVoice generation settings below.
 
-Usage: uv run modal run bench/tts.py --dialog bench/dialogs/conv05.json --voices ../samples/voices
-       uv run modal run bench/tts.py --dialog bench/dialogs/dev --voices ../samples/voices   (every dialog in a folder)
-Writes <out>/<dialog name>/lines/NN_<speaker>.wav (24 kHz).
+Usage: uv run modal run bench/tts.py --dialog bench/dialogs/test/t07.json
+       uv run modal run bench/tts.py --dialog bench/dialogs/dev   (every dialog in a folder)
+Voices come from data/voices (conv01-02 used FLEURS voices: --voices ../data/synthetic/sources).
+Writes data/synthetic/<split>/<dialog name>/lines/NN_<speaker>.wav (24 kHz), or <out>/<dialog name>/lines with --out.
 """
 import json
 import random
@@ -106,8 +107,10 @@ def prepare(dialog_path: Path, voices: Path) -> tuple[list[dict], dict, dict]:
 
 
 @app.local_entrypoint()
-def main(dialog: str, voices: str = "../samples/synthetic/sources", out: str = "../samples/synthetic"):
-    path, voices = Path(dialog), Path(voices)
+def main(dialog: str, voices: str = "", out: str = ""):
+    from paths import VOICES, synthetic_dir
+
+    path, voices = Path(dialog), Path(voices) if voices else VOICES
     dialogs = sorted(path.glob("*.json")) if path.is_dir() else [path]
     jobs = [prepare(d, voices) for d in dialogs]
 
@@ -116,7 +119,7 @@ def main(dialog: str, voices: str = "../samples/synthetic/sources", out: str = "
     for d, (_, _, refs), wavs in zip(dialogs, jobs, results):
         spec = json.loads(d.read_text())
         items = [(i, item) for i, item in enumerate(spec["script"]) if "speaker" in item]
-        out_dir = Path(out) / d.stem / "lines"
+        out_dir = (Path(out) / d.stem if out else synthetic_dir(d)) / "lines"
         out_dir.mkdir(parents=True, exist_ok=True)
         for (i, item), wav in zip(items, wavs):
             (out_dir / f"{i:02d}_{item['speaker']}.wav").write_bytes(wav)

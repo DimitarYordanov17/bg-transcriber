@@ -2,9 +2,9 @@
 
 Usage: uv run python bench/evaluate.py --split test --name whisper-large-v3 --notes "no preprocessing"
 
-Synthetic audio and truth come from ../samples/synthetic/<dialog>/. Real clips of the same split are scored too:
-../samples/real/<split>/<name>.flac with the hand-corrected <name>.txt ("[mm:ss] A: text" per line).
-Hypotheses and per-file scores are kept in ../samples/runs/<time>_<name>/ so a run can be inspected later.
+Synthetic audio and truth come from data/synthetic/<split>/<dialog>/. Real clips of the same split are scored too:
+data/real/<split>/<name>.flac with the hand-corrected <name>.txt ("[mm:ss] A: text" per line).
+Hypotheses and per-file scores are kept in runs/<time>_<name>/, the summary row goes to runs/results.md.
 """
 import argparse
 import json
@@ -18,11 +18,12 @@ from pathlib import Path
 import modal
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench.paths import REAL, RUNS, SYNTHETIC  # noqa: E402
 from bench.score import counts  # noqa: E402
 from modal_app import Transcriber, app  # noqa: E402
 
 PROFILES = ["clean", "quiet_speaker", "phone", "noisy", "mixed"]
-RESULTS = Path(__file__).parent / "results.md"
+RESULTS = RUNS / "results.md"
 HEADER = ("| Date | Commit | Split | Run | WER verbatim | WER clean | CER clean | "
           + " | ".join(f"{p} WER" for p in PROFILES) + " | Real WER | Notes |\n"
           + "|" + "---|" * (9 + len(PROFILES)) + "\n")
@@ -30,7 +31,7 @@ TURN_PREFIX = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?[A-ZА-Я]\s*(?:\([^)]*\))?\s*:
 
 
 def real_clips(split: str) -> list[Path]:
-    folder = Path("../samples/real") / split
+    folder = REAL / split
     return sorted(p for p in folder.glob("*.flac") if p.with_suffix(".txt").exists())
 
 
@@ -53,12 +54,13 @@ def main() -> None:
     ap.add_argument("--split", default="dev")
     ap.add_argument("--name", required=True)
     ap.add_argument("--notes", default="")
-    ap.add_argument("--data", type=Path, default=Path("../samples/synthetic"))
+    ap.add_argument("--data", type=Path, help="synthetic conversations (default: data/synthetic/<split>)")
     ap.add_argument("--clean-audio", action="store_true", help="use <name>_clean.wav (no degradation, equal levels)")
     args = ap.parse_args()
 
     names = sorted(p.stem for p in (Path(__file__).parent / "dialogs" / args.split).glob("*.json"))
-    run_dir = Path("../samples/runs") / f"{time.strftime('%Y%m%d-%H%M%S')}_{args.name}"
+    args.data = args.data or SYNTHETIC / args.split
+    run_dir = RUNS / f"{time.strftime('%Y%m%d-%H%M%S')}_{args.name}"
     run_dir.mkdir(parents=True)
 
     with modal.enable_output(), app.run():

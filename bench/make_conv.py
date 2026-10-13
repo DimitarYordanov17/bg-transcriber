@@ -9,15 +9,14 @@ Conditions and noise come either from the dialog itself ("condition" per speaker
 
 Timing: each item starts `gap` seconds after the latest-ending item so far (negative gap = overlap).
 
-Writes into <out>/<name>/: <name>.wav (degraded), <name>_clean.wav (same timing, speech only, equal levels),
+Writes into data/synthetic/<split>/<name>/ (or <out>/<name>/ with --out): <name>.wav (degraded), <name>_clean.wav (same timing, speech only, equal levels),
 <name>.txt and <name>.json.
 
-Usage: uv run python bench/make_conv.py --dialog bench/dialogs/conv05.json
+Usage: uv run python bench/make_conv.py --dialog bench/dialogs/test/t07.json
        uv run python bench/make_conv.py --dialog bench/dialogs/dev   (every dialog in a folder)
 """
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -30,10 +29,11 @@ import pyloudnorm
 import soundfile as sf
 from scipy.signal import fftconvolve, resample_poly
 
+from paths import SOURCES, synthetic_dir
+
 warnings.filterwarnings("ignore", "Possible clipped samples")
 
 SR = 16000
-FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
 rng = np.random.default_rng(7)
 meter = pyloudnorm.Meter(SR)
 
@@ -90,10 +90,10 @@ def room_ir(rt60: float) -> np.ndarray:
 
 def phone_line(x: np.ndarray) -> np.ndarray:
     """300-3400 Hz band, 8 kHz G.711 mu-law, back to 16 kHz. Same chain as a landline call."""
-    cmd = [FFMPEG, "-nostdin", "-v", "error", "-f", "f32le", "-ar", str(SR), "-ac", "1", "-i", "-",
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-f", "f32le", "-ar", str(SR), "-ac", "1", "-i", "-",
            "-af", "highpass=f=300,lowpass=f=3400", "-ar", "8000", "-c:a", "pcm_mulaw", "-f", "wav", "-"]
     mulaw = subprocess.run(cmd, input=x.astype(np.float32).tobytes(), capture_output=True, check=True).stdout
-    cmd = [FFMPEG, "-nostdin", "-v", "error", "-i", "-", "-ar", str(SR), "-f", "f32le", "-"]
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", "-", "-ar", str(SR), "-f", "f32le", "-"]
     out = subprocess.run(cmd, input=mulaw, capture_output=True, check=True).stdout
     return np.frombuffer(out, dtype=np.float32)[:len(x)]
 
@@ -138,9 +138,9 @@ def spoken_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]", "", text)).strip()
 
 
-def build(dialog: Path, sources: Path, out_root: Path, lines_dir: Path | None = None) -> None:
+def build(dialog: Path, sources: Path, out_root: Path | None = None, lines_dir: Path | None = None) -> None:
     name = dialog.stem
-    out = out_root / name
+    out = out_root / name if out_root else synthetic_dir(dialog)
     lines_dir = lines_dir or out / "lines"
     spec = json.loads(dialog.read_text())
     sfx_files = sorted((sources / "sfx").glob("*.wav"))
@@ -200,9 +200,9 @@ def build(dialog: Path, sources: Path, out_root: Path, lines_dir: Path | None = 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dialog", type=Path, required=True, help="a dialog .json or a folder of them")
-    ap.add_argument("--sources", type=Path, default=Path("../samples/synthetic/sources"))
+    ap.add_argument("--sources", type=Path, default=SOURCES)
     ap.add_argument("--lines", type=Path, help="rendered lines (default: <out>/<name>/lines)")
-    ap.add_argument("--out", type=Path, default=Path("../samples/synthetic"))
+    ap.add_argument("--out", type=Path, help="write to <out>/<name>/ instead of data/synthetic/<split>/<name>/")
     args = ap.parse_args()
     dialogs = sorted(args.dialog.glob("*.json")) if args.dialog.is_dir() else [args.dialog]
     for d in dialogs:

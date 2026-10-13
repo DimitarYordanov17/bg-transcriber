@@ -3,11 +3,10 @@
 For every file: diarize (exclusive, so no overlapping speech), take each speaker's longest uninterrupted
 stretch (3-10 s), cut it from the original audio at 24 kHz and transcribe it with Whisper as the reference text.
 
-Usage: FFMPEG=... uv run python bench/voice_refs.py ../samples/personal/*.flac --out ../samples/voices
+Usage: uv run python bench/voice_refs.py ../data/real/unlabeled/stoyan_kolev_*.flac
 """
 import argparse
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -16,9 +15,9 @@ import modal
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench.paths import VOICES  # noqa: E402
 from modal_app import Diarizer, Transcriber, app  # noqa: E402
 
-FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
 MIN_LEN, MAX_LEN, JOIN_GAP = 3.0, 10.0, 0.5
 
 
@@ -56,7 +55,7 @@ def median_pitch(wav: bytes) -> float:
 
 
 def cut(path: Path, start: float, end: float) -> bytes:
-    cmd = [FFMPEG, "-nostdin", "-v", "error", "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", str(path),
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", str(path),
            "-ac", "1", "-ar", "24000", "-f", "wav", "-"]
     return subprocess.run(cmd, capture_output=True, check=True).stdout
 
@@ -64,7 +63,7 @@ def cut(path: Path, start: float, end: float) -> bytes:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+", type=Path)
-    ap.add_argument("--out", type=Path, default=Path("../samples/voices"))
+    ap.add_argument("--out", type=Path, default=VOICES)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
