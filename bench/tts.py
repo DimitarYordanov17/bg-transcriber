@@ -1,6 +1,6 @@
 """Render every spoken line of a dialog with OmniVoice, cloning each speaker's voice from a FLEURS clip.
 
-Usage: uv run modal run bench/tts.py --dialog bench/dialogs/conv02.json
+Usage: uv run modal run bench/tts.py --dialog bench/dialogs/conv02.json [--voices ../samples/voices]
 Writes <out>/<dialog name>/NN_<speaker>.wav (24 kHz).
 """
 import json
@@ -44,15 +44,15 @@ def render(lines: list[dict]) -> list[bytes]:
 
 
 @app.local_entrypoint()
-def main(dialog: str, sources: str = "../samples/synthetic/sources", out: str = "../samples/synthetic/tts"):
-    dialog_path, sources = Path(dialog), Path(sources)
+def main(dialog: str, voices: str = "../samples/synthetic/sources", out: str = "../samples/synthetic/tts"):
+    dialog_path, voices = Path(dialog), Path(voices)
     spec = json.loads(dialog_path.read_text())
     items = [(i, item) for i, item in enumerate(spec["script"]) if "speaker" in item]
     lines = []
     for _, item in items:
         voice = spec["speakers"][item["speaker"]]["voice"]
-        lines.append({"text": item["text"], "ref_audio": (sources / f"{voice}.wav").read_bytes(),
-                      "ref_text": (sources / f"{voice}.txt").read_text().strip()})
+        lines.append({"text": item["text"], "ref_audio": (voices / f"{voice}.wav").read_bytes(),
+                      "ref_text": (voices / f"{voice}.txt").read_text().strip()})
 
     wavs = render.remote(lines)
 
