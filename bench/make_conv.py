@@ -6,7 +6,7 @@ from ESC-50 are dropped in where the script says, and cafeteria noise from DEMAN
 
 Timing: each item starts `gap` seconds after the latest-ending item so far (negative gap = overlap).
 
-Writes <name>.wav (degraded), <name>_clean.wav (same timing, speech only, equal levels), <name>.txt and <name>.json.
+Writes into <out>/<name>/: <name>.wav (degraded), <name>_clean.wav (same timing, speech only, equal levels), <name>.txt and <name>.json.
 
 Usage: uv run python bench/make_conv.py --dialog bench/dialogs/conv02.json
 """
@@ -101,11 +101,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dialog", type=Path, required=True)
     ap.add_argument("--sources", type=Path, default=Path("../samples/synthetic/sources"))
-    ap.add_argument("--lines", type=Path, help="rendered lines (default: ../samples/synthetic/tts/<name>)")
+    ap.add_argument("--lines", type=Path, help="rendered lines (default: <out>/<name>/lines)")
     ap.add_argument("--out", type=Path, default=Path("../samples/synthetic"))
     args = ap.parse_args()
     name = args.dialog.stem
-    lines_dir = args.lines or Path("../samples/synthetic/tts") / name
+    out = args.out / name
+    lines_dir = args.lines or out / "lines"
     spec = json.loads(args.dialog.read_text())
     sfx_files = sorted((args.sources / "sfx").glob("*.wav"))
 
@@ -147,12 +148,12 @@ def main() -> None:
     if peak > 0.98:
         mix *= 0.98 / peak
 
-    args.out.mkdir(parents=True, exist_ok=True)
-    sf.write(args.out / f"{name}.wav", mix, SR)
-    sf.write(args.out / f"{name}_clean.wav", clean / max(1.0, np.abs(clean).max() / 0.98), SR)
+    out.mkdir(parents=True, exist_ok=True)
+    sf.write(out / f"{name}.wav", mix, SR)
+    sf.write(out / f"{name}_clean.wav", clean / max(1.0, np.abs(clean).max() / 0.98), SR)
     txt = "\n".join(f"[{t['start']:05.2f} - {t['end']:05.2f}] Говорител {t['speaker']}: {t['text']}" for t in turns)
-    (args.out / f"{name}.txt").write_text(txt + "\n")
-    (args.out / f"{name}.json").write_text(json.dumps(
+    (out / f"{name}.txt").write_text(txt + "\n")
+    (out / f"{name}.json").write_text(json.dumps(
         {"duration": round(total / SR, 2), "speakers": spec["speakers"], "noise": noise_spec,
          "turns": turns, "events": events}, ensure_ascii=False, indent=1))
     print(txt)
