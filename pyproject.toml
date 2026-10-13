@@ -3,4 +3,7 @@ name = "bg-transcriber"
 version = "0.1.0"
 description = "Multi-speaker Bulgarian transcription built on open-source models."
 requires-python = ">=3.12,<3.13"
-dependencies = ["modal"]
+dependencies = [
+    "modal",
+    "numpy>=2.5.4",
+]
