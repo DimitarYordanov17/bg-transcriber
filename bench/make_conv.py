@@ -1,15 +1,19 @@
-"""Build one synthetic 3-speaker conversation from clean FLEURS clips.
+"""Build a synthetic multi-speaker conversation from a dialog script.
 
-Each speaker gets their own recording condition (loud and close, quiet and far, phone line),
-then cafeteria noise from DEMAND is laid under the whole thing.
+Spoken lines are rendered beforehand by bench/tts.py (OmniVoice, voices cloned from FLEURS speakers).
+Each speaker gets their own recording condition (loud and close, quiet and far, phone line), sound effects
+from ESC-50 are dropped in where the script says, and cafeteria noise from DEMAND runs under everything.
 
-Writes conv01.wav (degraded), conv01_clean.wav (same timing, no degradation), conv01.txt and conv01.json.
+Timing: each item starts `gap` seconds after the latest-ending item so far (negative gap = overlap).
 
-Usage: python bench/make_conv.py --sources ../samples/synthetic/sources --out ../samples/synthetic
+Writes <name>.wav (degraded), <name>_clean.wav (same timing, speech only, equal levels), <name>.txt and <name>.json.
+
+Usage: uv run python bench/make_conv.py --dialog bench/dialogs/conv02.json
 """
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import warnings
@@ -18,34 +22,27 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm
 import soundfile as sf
-from scipy.signal import fftconvolve
+from scipy.signal import fftconvolve, resample_poly
 
 warnings.filterwarnings("ignore", "Possible clipped samples")
 
 SR = 16000
-SRC = Path("../samples/synthetic/sources")
-OUT = Path("../samples/synthetic")
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
 rng = np.random.default_rng(7)
 meter = pyloudnorm.Meter(SR)
 
-SPEAKERS = {"A": "near", "B": "far", "C": "phone"}
 LOUDNESS = {"near": -18.0, "far": -36.0, "phone": -25.0}  # LUFS each speaker ends up at
-NOISE_LUFS = -40.0
-
-# speaker, source clip, which sentence (None = whole clip), pause before the turn (negative = overlap)
-TURNS = [
-    ("A", "10145399168975604452", 0, 0.0),
-    ("B", "10607669002366733860", None, 0.5),
-    ("C", "11290732792982580381", None, 0.35),
-    ("A", "10145399168975604452", 1, -0.3),
-]
+DEFAULT_GAP = 0.35
 
 
-def load(name: str) -> np.ndarray:
-    audio, sr = sf.read(SRC / name, dtype="float32")
-    assert sr == SR, (name, sr)
-    return audio if audio.ndim == 1 else audio[:, 0]
+def load(path: Path) -> np.ndarray:
+    audio, sr = sf.read(path, dtype="float32")
+    if audio.ndim > 1:
+        audio = audio[:, 0]
+    if sr != SR:
+        g = np.gcd(sr, SR)
+        audio = resample_poly(audio, SR // g, sr // g).astype(np.float32)
+    return audio
 
 
 def frame_db(x: np.ndarray, frame: int) -> np.ndarray:
@@ -53,24 +50,13 @@ def frame_db(x: np.ndarray, frame: int) -> np.ndarray:
     return 20 * np.log10(rms)
 
 
-def trim_silence(x: np.ndarray, pad: float = 0.1) -> np.ndarray:
+def trim_silence(x: np.ndarray, pad: float = 0.05) -> np.ndarray:
     frame = int(0.02 * SR)
     db = frame_db(x, frame)
     active = np.where(db > db.max() - 35)[0]
     start = max(0, active[0] * frame - int(pad * SR))
     end = min(len(x), (active[-1] + 1) * frame + int(pad * SR))
     return x[start:end]
-
-
-def split_at_pause(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Cut at the quietest 300 ms in the middle half of the clip (the pause between two sentences)."""
-    frame = int(0.02 * SR)
-    db = frame_db(x, frame)
-    window = 15
-    smooth = np.convolve(db, np.ones(window) / window, mode="same")
-    lo, hi = len(db) // 4, 3 * len(db) // 4
-    cut = (lo + int(np.argmin(smooth[lo:hi]))) * frame
-    return trim_silence(x[:cut]), trim_silence(x[cut:])
 
 
 def set_loudness(x: np.ndarray, lufs: float) -> np.ndarray:
@@ -106,60 +92,72 @@ def degrade(x: np.ndarray, condition: str) -> np.ndarray:
     return set_loudness(x, LOUDNESS[condition])
 
 
+def spoken_text(text: str) -> str:
+    """Drop TTS tags like [laughter]; they are not words anyone should transcribe."""
+    return re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]", "", text)).strip()
+
+
 def main() -> None:
-    global SRC
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sources", type=Path, default=SRC)
-    ap.add_argument("--out", type=Path, default=OUT)
+    ap.add_argument("--dialog", type=Path, required=True)
+    ap.add_argument("--sources", type=Path, default=Path("../samples/synthetic/sources"))
+    ap.add_argument("--lines", type=Path, help="rendered lines (default: ../samples/synthetic/tts/<name>)")
+    ap.add_argument("--out", type=Path, default=Path("../samples/synthetic"))
     args = ap.parse_args()
-    SRC, out = args.sources, args.out
+    name = args.dialog.stem
+    lines_dir = args.lines or Path("../samples/synthetic/tts") / name
+    spec = json.loads(args.dialog.read_text())
+    sfx_files = sorted((args.sources / "sfx").glob("*.wav"))
 
-    clips, texts = [], []
-    for _, src, part, _ in TURNS:
-        audio = trim_silence(load(f"{src}.wav"))
-        text = (SRC / f"{src}.txt").read_text().strip()
-        if part is not None:
-            audio = split_at_pause(audio)[part]
-            sentences = text.replace(". ", ".\n").split("\n")
-            text = sentences[part]
-        clips.append(audio)
-        texts.append(text)
-
-    starts, t = [], 0.0
-    for (_, _, _, pause), clip in zip(TURNS, clips):
-        t += pause
-        starts.append(t)
-        t += len(clip) / SR
-    total = int((max(s + len(c) / SR for s, c in zip(starts, clips)) + 0.5) * SR)
+    # place every item on the timeline
+    placed, cursor = [], 0.0
+    for i, item in enumerate(spec["script"]):
+        if "speaker" in item:
+            audio = trim_silence(load(lines_dir / f"{i:02d}_{item['speaker']}.wav"))
+        else:
+            options = [f for f in sfx_files if f.name.startswith(item["sfx"] + "_")]
+            audio = trim_silence(load(options[rng.integers(len(options))]))
+        start = max(0.0, cursor + item.get("gap", DEFAULT_GAP))
+        end = start + len(audio) / SR
+        placed.append((item, audio, start, end))
+        cursor = max(cursor, end)
+    total = int((cursor + 0.5) * SR)
 
     clean = np.zeros(total, dtype=np.float32)
     mix = np.zeros(total, dtype=np.float32)
-    truth = []
-    for (speaker, src, _, _), clip, text, start in zip(TURNS, clips, texts, starts):
-        condition = SPEAKERS[speaker]
+    turns, events = [], []
+    for item, audio, start, end in placed:
         i = int(start * SR)
-        clean[i:i + len(clip)] += set_loudness(clip, -20.0)
-        mix[i:i + len(clip)] += degrade(clip, condition)
-        truth.append({"speaker": speaker, "start": round(start, 2), "end": round(start + len(clip) / SR, 2),
-                      "condition": condition, "lufs": LOUDNESS[condition], "source": f"fleurs bg_bg dev {src}.wav",
-                      "text": text})
+        if "speaker" in item:
+            condition = spec["speakers"][item["speaker"]]["condition"]
+            clean[i:i + len(audio)] += set_loudness(audio, -20.0)
+            mix[i:i + len(audio)] += degrade(audio, condition)
+            turns.append({"speaker": item["speaker"], "start": round(start, 2), "end": round(end, 2),
+                          "condition": condition, "text": spoken_text(item["text"])})
+        else:
+            mix[i:i + len(audio)] += set_loudness(audio, item.get("lufs", -30.0))
+            events.append({"sound": item["sfx"], "start": round(start, 2), "end": round(end, 2)})
 
-    noise = load("demand_pcafeter_ch01.wav")
+    noise_spec = spec["noise"]
+    noise = load(args.sources / noise_spec["file"])
     offset = rng.integers(0, len(noise) - total)
-    mix += set_loudness(noise[offset:offset + total], NOISE_LUFS)
+    mix += set_loudness(noise[offset:offset + total], noise_spec["lufs"])
 
     peak = np.abs(mix).max()
     if peak > 0.98:
         mix *= 0.98 / peak
 
-    sf.write(out / "conv01.wav", mix, SR)
-    sf.write(out / "conv01_clean.wav", clean / max(1.0, np.abs(clean).max() / 0.98), SR)
-    (out / "conv01.txt").write_text("\n".join(
-        f"[{t['start']:05.2f} - {t['end']:05.2f}] Говорител {t['speaker']}: {t['text']}" for t in truth) + "\n")
-    (out / "conv01.json").write_text(json.dumps(
-        {"duration": round(total / SR, 2), "noise": {"source": "DEMAND PCAFETER ch01", "lufs": NOISE_LUFS},
-         "turns": truth}, ensure_ascii=False, indent=1))
-    print((out / "conv01.txt").read_text(), end="")
+    args.out.mkdir(parents=True, exist_ok=True)
+    sf.write(args.out / f"{name}.wav", mix, SR)
+    sf.write(args.out / f"{name}_clean.wav", clean / max(1.0, np.abs(clean).max() / 0.98), SR)
+    txt = "\n".join(f"[{t['start']:05.2f} - {t['end']:05.2f}] Говорител {t['speaker']}: {t['text']}" for t in turns)
+    (args.out / f"{name}.txt").write_text(txt + "\n")
+    (args.out / f"{name}.json").write_text(json.dumps(
+        {"duration": round(total / SR, 2), "speakers": spec["speakers"], "noise": noise_spec,
+         "turns": turns, "events": events}, ensure_ascii=False, indent=1))
+    print(txt)
+    for e in events:
+        print(f"[{e['start']:05.2f} - {e['end']:05.2f}] ({e['sound']})")
     print(f"duration {total / SR:.1f}s, mix {meter.integrated_loudness(mix):.1f} LUFS", file=sys.stderr)
 
 
