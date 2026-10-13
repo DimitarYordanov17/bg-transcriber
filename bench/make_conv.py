@@ -1,14 +1,19 @@
 """Build a synthetic multi-speaker conversation from a dialog script.
 
-Spoken lines are rendered beforehand by bench/tts.py (OmniVoice, voices cloned from FLEURS speakers).
-Each speaker gets their own recording condition (loud and close, quiet and far, phone line), sound effects
-from ESC-50 are dropped in where the script says, and cafeteria noise from DEMAND runs under everything.
+Spoken lines are rendered beforehand by bench/tts.py (OmniVoice, voices cloned from reference clips).
+Each speaker gets their own recording condition (near, mid, far, phone line), sound effects from ESC-50 are
+dropped in where the script says, and background noise from DEMAND runs under everything.
+
+Conditions and noise come either from the dialog itself ("condition" per speaker, "noise" block) or from its
+"profile" (see PROFILES), drawn at random but reproducibly, seeded by the dialog name.
 
 Timing: each item starts `gap` seconds after the latest-ending item so far (negative gap = overlap).
 
-Writes into <out>/<name>/: <name>.wav (degraded), <name>_clean.wav (same timing, speech only, equal levels), <name>.txt and <name>.json.
+Writes into <out>/<name>/: <name>.wav (degraded), <name>_clean.wav (same timing, speech only, equal levels),
+<name>.txt and <name>.json.
 
-Usage: uv run python bench/make_conv.py --dialog bench/dialogs/conv02.json
+Usage: uv run python bench/make_conv.py --dialog bench/dialogs/conv05.json
+       uv run python bench/make_conv.py --dialog bench/dialogs/dev   (every dialog in a folder)
 """
 import argparse
 import json
@@ -17,6 +22,7 @@ import re
 import subprocess
 import sys
 import warnings
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -31,8 +37,17 @@ FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
 rng = np.random.default_rng(7)
 meter = pyloudnorm.Meter(SR)
 
-LOUDNESS = {"near": -18.0, "far": -36.0, "phone": -25.0}  # LUFS each speaker ends up at
+LOUDNESS = {"near": -18.0, "mid": -24.0, "far": -36.0, "phone": -25.0}  # LUFS each speaker ends up at
 DEFAULT_GAP = 0.35
+
+# base conditions for most speakers, one speaker who gets the special condition, noise level range (LUFS)
+PROFILES = {
+    "clean":         {"base": ["near", "mid"], "special": None, "noise": (-55, -48)},
+    "quiet_speaker": {"base": ["near", "mid"], "special": "far", "noise": (-46, -40)},
+    "phone":         {"base": ["near", "mid"], "special": "phone", "noise": (-46, -40)},
+    "noisy":         {"base": ["near", "mid"], "special": None, "noise": (-34, -28)},
+    "mixed":         {"base": ["near", "far", "phone", "mid"], "special": None, "noise": (-42, -36)},
+}
 
 
 def load(path: Path) -> np.ndarray:
@@ -60,6 +75,9 @@ def trim_silence(x: np.ndarray, pad: float = 0.05) -> np.ndarray:
 
 
 def set_loudness(x: np.ndarray, lufs: float) -> np.ndarray:
+    if len(x) < SR // 2:  # too short for the LUFS meter (a sigh, an "аха"): use RMS level instead
+        rms_db = 20 * np.log10(np.sqrt(np.mean(x ** 2)) + 1e-9)
+        return x * 10 ** ((lufs - rms_db) / 20)
     return pyloudnorm.normalize.loudness(x, meter.integrated_loudness(x), lufs)
 
 
@@ -80,16 +98,39 @@ def phone_line(x: np.ndarray) -> np.ndarray:
     return np.frombuffer(out, dtype=np.float32)[:len(x)]
 
 
-ROOMS = {"near": (room_ir(0.25), 0.15), "far": (room_ir(0.7), 0.9)}
+ROOMS = {"near": (room_ir(0.25), 0.15), "far": (room_ir(0.7), 0.9), "mid": (room_ir(0.45), 0.4)}
 
 
-def degrade(x: np.ndarray, condition: str) -> np.ndarray:
+def degrade(x: np.ndarray, condition: str, lufs: float) -> np.ndarray:
     if condition in ROOMS:
         ir, wet = ROOMS[condition]
         x = x + wet * fftconvolve(x, ir)[:len(x)]
     elif condition == "phone":
         x = phone_line(x)
-    return set_loudness(x, LOUDNESS[condition])
+    return set_loudness(x, lufs)
+
+
+def assign_conditions(spec: dict, conv_rng: np.random.Generator, sources: Path) -> tuple[dict, dict]:
+    """Per speaker {condition, lufs} and the noise {file, lufs}, from the dialog or drawn from its profile."""
+    speakers = list(spec["speakers"])
+    profile = PROFILES.get(spec.get("profile", ""), PROFILES["mixed"])
+    if all("condition" in spec["speakers"][s] for s in speakers):
+        conditions = {s: spec["speakers"][s]["condition"] for s in speakers}
+    elif spec.get("profile") == "mixed":
+        pool = list(conv_rng.permutation(profile["base"]))
+        conditions = {s: pool[i % len(pool)] for i, s in enumerate(speakers)}
+    else:
+        conditions = {s: str(conv_rng.choice(profile["base"])) for s in speakers}
+        if profile["special"]:
+            conditions[speakers[conv_rng.integers(len(speakers))]] = profile["special"]
+    levels = {s: {"condition": c, "lufs": round(LOUDNESS[c] + float(conv_rng.uniform(-3, 3)), 1)}
+              for s, c in conditions.items()}
+    if "noise" in spec:
+        noise = spec["noise"]
+    else:
+        files = sorted(p.name for p in sources.glob("demand_*.wav"))
+        noise = {"file": str(conv_rng.choice(files)), "lufs": round(float(conv_rng.uniform(*profile["noise"])), 1)}
+    return levels, noise
 
 
 def spoken_text(text: str) -> str:
@@ -97,18 +138,14 @@ def spoken_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]", "", text)).strip()
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dialog", type=Path, required=True)
-    ap.add_argument("--sources", type=Path, default=Path("../samples/synthetic/sources"))
-    ap.add_argument("--lines", type=Path, help="rendered lines (default: <out>/<name>/lines)")
-    ap.add_argument("--out", type=Path, default=Path("../samples/synthetic"))
-    args = ap.parse_args()
-    name = args.dialog.stem
-    out = args.out / name
-    lines_dir = args.lines or out / "lines"
-    spec = json.loads(args.dialog.read_text())
-    sfx_files = sorted((args.sources / "sfx").glob("*.wav"))
+def build(dialog: Path, sources: Path, out_root: Path, lines_dir: Path | None = None) -> None:
+    name = dialog.stem
+    out = out_root / name
+    lines_dir = lines_dir or out / "lines"
+    spec = json.loads(dialog.read_text())
+    sfx_files = sorted((sources / "sfx").glob("*.wav"))
+    conv_rng = np.random.default_rng(zlib.crc32(name.encode()))
+    levels, noise_spec = assign_conditions(spec, conv_rng, sources)
 
     # place every item on the timeline
     placed, cursor = [], 0.0
@@ -117,7 +154,7 @@ def main() -> None:
             audio = trim_silence(load(lines_dir / f"{i:02d}_{item['speaker']}.wav"))
         else:
             options = [f for f in sfx_files if f.name.startswith(item["sfx"] + "_")]
-            audio = trim_silence(load(options[rng.integers(len(options))]))
+            audio = trim_silence(load(options[conv_rng.integers(len(options))]))
         start = max(0.0, cursor + item.get("gap", DEFAULT_GAP))
         end = start + len(audio) / SR
         placed.append((item, audio, start, end))
@@ -130,18 +167,17 @@ def main() -> None:
     for item, audio, start, end in placed:
         i = int(start * SR)
         if "speaker" in item:
-            condition = spec["speakers"][item["speaker"]]["condition"]
+            condition, lufs = levels[item["speaker"]]["condition"], levels[item["speaker"]]["lufs"]
             clean[i:i + len(audio)] += set_loudness(audio, -20.0)
-            mix[i:i + len(audio)] += degrade(audio, condition)
+            mix[i:i + len(audio)] += degrade(audio, condition, lufs)
             turns.append({"speaker": item["speaker"], "start": round(start, 2), "end": round(end, 2),
                           "condition": condition, "text": spoken_text(item["text"])})
         else:
             mix[i:i + len(audio)] += set_loudness(audio, item.get("lufs", -30.0))
             events.append({"sound": item["sfx"], "start": round(start, 2), "end": round(end, 2)})
 
-    noise_spec = spec["noise"]
-    noise = load(args.sources / noise_spec["file"])
-    offset = rng.integers(0, len(noise) - total)
+    noise = load(sources / noise_spec["file"])
+    offset = conv_rng.integers(0, len(noise) - total)
     mix += set_loudness(noise[offset:offset + total], noise_spec["lufs"])
 
     peak = np.abs(mix).max()
@@ -154,12 +190,23 @@ def main() -> None:
     txt = "\n".join(f"[{t['start']:05.2f} - {t['end']:05.2f}] Говорител {t['speaker']}: {t['text']}" for t in turns)
     (out / f"{name}.txt").write_text(txt + "\n")
     (out / f"{name}.json").write_text(json.dumps(
-        {"duration": round(total / SR, 2), "speakers": spec["speakers"], "noise": noise_spec,
-         "turns": turns, "events": events}, ensure_ascii=False, indent=1))
-    print(txt)
-    for e in events:
-        print(f"[{e['start']:05.2f} - {e['end']:05.2f}] ({e['sound']})")
-    print(f"duration {total / SR:.1f}s, mix {meter.integrated_loudness(mix):.1f} LUFS", file=sys.stderr)
+        {"duration": round(total / SR, 2), "profile": spec.get("profile"), "topic": spec.get("topic"),
+         "speakers": levels, "noise": noise_spec, "turns": turns, "events": events}, ensure_ascii=False, indent=1))
+    conds = ", ".join(f"{s}={v['condition']}" for s, v in levels.items())
+    print(f"{name}: {total / SR:.1f}s, {spec.get('profile', '-')}, {conds}, noise {noise_spec['file']} "
+          f"{noise_spec['lufs']}", file=sys.stderr)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dialog", type=Path, required=True, help="a dialog .json or a folder of them")
+    ap.add_argument("--sources", type=Path, default=Path("../samples/synthetic/sources"))
+    ap.add_argument("--lines", type=Path, help="rendered lines (default: <out>/<name>/lines)")
+    ap.add_argument("--out", type=Path, default=Path("../samples/synthetic"))
+    args = ap.parse_args()
+    dialogs = sorted(args.dialog.glob("*.json")) if args.dialog.is_dir() else [args.dialog]
+    for d in dialogs:
+        build(d, args.sources, args.out, args.lines)
 
 
 if __name__ == "__main__":
