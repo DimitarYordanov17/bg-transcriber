@@ -1,6 +1,20 @@
 import numpy as np
 from faster_whisper import WhisperModel
 
+_find_alignment = WhisperModel.find_alignment
+
+
+def _safe_find_alignment(self, tokenizer, text_tokens, *args, **kwargs):
+    # faster-whisper 1.2.x raises IndexError when the aligner returns nothing for a segment;
+    # keep the segment's text and skip its word timestamps instead of failing the whole file
+    try:
+        return _find_alignment(self, tokenizer, text_tokens, *args, **kwargs)
+    except IndexError:
+        return [[] for _ in text_tokens]
+
+
+WhisperModel.find_alignment = _safe_find_alignment
+
 
 def load_model(name: str = "large-v3", cache_dir: str | None = None) -> WhisperModel:
     return WhisperModel(name, device="cuda", compute_type="float16", download_root=cache_dir)
