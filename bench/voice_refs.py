@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import modal
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from modal_app import Diarizer, Transcriber, app  # noqa: E402
@@ -34,6 +35,24 @@ def longest_stretches(turns: list[dict]) -> dict[str, tuple[float, float]]:
         if end - start >= MIN_LEN and end - start > best.get(speaker, (0, 0))[1] - best.get(speaker, (0, 0))[0]:
             best[speaker] = (start, end)
     return best
+
+
+def median_pitch(wav: bytes) -> float:
+    """Median fundamental frequency (Hz) of the voiced frames, by autocorrelation."""
+    x = np.frombuffer(wav[44:], dtype=np.int16).astype(np.float32) / 32768
+    sr, frame, hop = 24000, 960, 240
+    lo, hi = sr // 350, sr // 70
+    energy = np.array([np.mean(x[i:i + frame] ** 2) for i in range(0, len(x) - frame, hop)])
+    pitches = []
+    for k, i in enumerate(range(0, len(x) - frame, hop)):
+        if energy[k] < np.median(energy):
+            continue
+        f = x[i:i + frame] - x[i:i + frame].mean()
+        ac = np.correlate(f, f, mode="full")[frame - 1:]
+        lag = lo + int(np.argmax(ac[lo:hi]))
+        if ac[lag] > 0.5 * ac[0]:
+            pitches.append(sr / lag)
+    return float(np.median(pitches)) if pitches else 0.0
 
 
 def cut(path: Path, start: float, end: float) -> bytes:
@@ -66,13 +85,20 @@ def main() -> None:
                     end = start + words[-1]["end"] + 0.15 if words else start + MAX_LEN
                 text = " ".join(w["text"] for w in words)
                 name = f"{path.stem}__{speaker}"
-                (args.out / f"{name}.wav").write_bytes(cut(path, start, end))
+                wav = cut(path, start, end)
+                pitch = median_pitch(wav)
+                (args.out / f"{name}.wav").write_bytes(wav)
                 (args.out / f"{name}.txt").write_text(text + "\n")
-                index.append({"voice": name, "source": path.name, "start": start, "end": round(end, 2),
+                index.append({"voice": name, "person": name, "gender": "f" if pitch > 165 else "m",
+                              "pitch": round(pitch), "source": path.name, "start": start, "end": round(end, 2),
                               "text": text})
-                print(f"  -> {name} ({end - start:.1f}s): {text}")
+                print(f"  -> {name} ({end - start:.1f}s, {pitch:.0f} Hz): {text}")
 
-    (args.out / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=1))
+    index_path = args.out / "index.json"
+    old = json.loads(index_path.read_text()) if index_path.exists() else []
+    new_names = {v["voice"] for v in index}
+    index_path.write_text(json.dumps([v for v in old if v["voice"] not in new_names] + index,
+                                     ensure_ascii=False, indent=1))
 
 
 if __name__ == "__main__":
