@@ -383,9 +383,7 @@ def transcribe_upload(name: str, mode: str, style: str = "readable") -> dict:
         data = f.read()
     os.remove(f"/uploads/{name}")
     uploads.commit()
-    log_path = f"/uploads/log/{name}.json"
-    entry = json.load(open(log_path)) if os.path.exists(log_path) else {"file": name}
-    started = time.time()
+    entry, started = {"file": name}, time.time()
     try:
         result = transcribe_file.local(data, name, mode, style)
         entry.update(status="done", audio_seconds=round(result["duration"]), speakers=result["speakers"],
@@ -396,7 +394,7 @@ def transcribe_upload(name: str, mode: str, style: str = "readable") -> dict:
         raise
     finally:
         entry["took_seconds"] = round(time.time() - started)
-        with open(log_path, "w") as f:
+        with open(f"/uploads/log/{name}.done.json", "w") as f:  # own file: the web container owns <name>.json
             json.dump(entry, f, ensure_ascii=False)
         uploads.commit()
 
@@ -419,7 +417,8 @@ def web():
     @api.post("/jobs")
     def start(request: Request, file: UploadFile = File(...), mode: str = Form("local"), verbatim: str = Form("")):
         import json
-        import time
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
 
         safe = re.sub(r"[^\w.-]", "_", file.filename or "audio")  # no backslash inside the f-string (Python < 3.12)
         name = f"{uuid.uuid4().hex[:8]}_{safe}"
@@ -429,7 +428,7 @@ def web():
         mode, style = ("mixed" if mode == "mixed" else "local"), ("verbatim" if verbatim else "readable")
         os.makedirs("/uploads/log", exist_ok=True)  # one small file per job: who uploaded what (the audio is not kept)
         with open(f"/uploads/log/{name}.json", "w") as f:
-            json.dump({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "file": file.filename,
+            json.dump({"time": datetime.now(ZoneInfo("Europe/Sofia")).strftime("%Y-%m-%d %H:%M:%S"), "file": file.filename,
                        "bytes": os.path.getsize(f"/uploads/{name}"), "mode": mode, "style": style,
                        "ip": request.headers.get("x-forwarded-for", request.client.host if request.client else ""),
                        "browser": request.headers.get("user-agent", "")}, f, ensure_ascii=False)
