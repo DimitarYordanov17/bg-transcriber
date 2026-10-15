@@ -53,7 +53,7 @@
     </div>
     <div class="modes">
       <label><input type="radio" name="mode" value="local" checked>
-        <span>Fully local <small>Open models only. The recording never leaves our machines.</small></span></label>
+        <span>Fully local <small>Open models only. The recording never leaves the machine it runs on.</small></span></label>
       <label><input type="radio" name="mode" value="mixed">
         <span>Mixed <small>Highest quality. Words are recognised by ElevenLabs Scribe.</small></span></label>
     </div>
@@ -70,7 +70,7 @@
   </section>
 
   <footer>
-    <p>* On our test sets (about 10,000 words of real Bulgarian speech: parliament sessions, podcasts and interviews),
+    <p>* On my test sets (about 10,000 words of real Bulgarian speech: parliament sessions, podcasts and interviews),
       the fully local pipeline makes 2.5× fewer errors than the best open speech model on formal speech (7.5% vs 18.5%)
       and 1.2× fewer on casual speech (12.7% vs 15.2%), at roughly 1/20 of the per-hour cost of a commercial service
       when it runs on your own GPUs, and the recording never leaves your machines. The mixed pipeline sends the audio to
@@ -80,11 +80,11 @@
       <tr><th></th><th>Fully local</th><th>Mixed</th></tr>
       <tr><td>Word errors, formal speech</td><td>7.5%</td><td>4.9%</td></tr>
       <tr><td>Word errors, casual speech</td><td>12.7%</td><td>9.3%</td></tr>
-      <tr><td>Cost per hour of audio</td><td>≈ €0.05 on own GPUs</td><td>≈ $0.60–0.90</td></tr>
+      <tr><td>Cost per hour of audio</td><td>≈ €0.03–0.05 (electricity, own GPUs)</td><td>≈ $0.60–0.90</td></tr>
     </table>
     <p>** Speed: in this demo a one-hour recording takes about 20 minutes. Most of that is starting the models on
       rented cloud GPUs and transcribing on a mid-range card. On dedicated, stronger GPUs with the models kept loaded
-      (no cold starts) and with batched decoding, we expect about 5–8 minutes per hour of audio.</p>
+      (no cold starts) and with batched decoding, I expect about 5–8 minutes per hour of audio.</p>
   </footer>
 </main>
 
