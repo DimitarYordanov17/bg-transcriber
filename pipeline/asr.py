@@ -16,13 +16,18 @@ def _safe_find_alignment(self, tokenizer, text_tokens, *args, **kwargs):
 WhisperModel.find_alignment = _safe_find_alignment
 
 
+DEFAULT_OPTIONS = {"beam_size": 5, "word_timestamps": True}
+
+
 def load_model(name: str = "large-v3", cache_dir: str | None = None) -> WhisperModel:
+    """name: a faster-whisper model name, or a path to a converted CTranslate2 model directory."""
     return WhisperModel(name, device="cuda", compute_type="float16", download_root=cache_dir)
 
 
-def transcribe(model: WhisperModel, audio: np.ndarray, language: str = "bg") -> list[dict]:
-    """Returns segments, each with its words: text, start, end and confidence (0-1)."""
-    segments, _ = model.transcribe(audio, language=language, beam_size=5, word_timestamps=True)
+def transcribe(model: WhisperModel, audio: np.ndarray, language: str = "bg", **options) -> list[dict]:
+    """Returns segments, each with its words: text, start, end and confidence (0-1).
+    options override faster-whisper's transcribe() arguments (beam_size, condition_on_previous_text...)."""
+    segments, _ = model.transcribe(audio, language=language, **{**DEFAULT_OPTIONS, **options})
     result = []
     for seg in segments:
         words = [{"text": w.word.strip(), "start": round(float(w.start), 2), "end": round(float(w.end), 2),
