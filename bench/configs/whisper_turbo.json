@@ -1,0 +1,1 @@
+{"name": "whisper_turbo", "asr": {"model": "turbo", "opts": {"beam_size": 5}}, "route": false}

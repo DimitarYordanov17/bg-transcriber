@@ -26,6 +26,14 @@ CONTRACTIONS = {"к'во": "какво", "к'ъв": "какъв", "к'ва": "к
 ABBREVIATIONS = {"г-жа": "госпожа", "г-н": "господин", "г-ца": "госпожица", "д-р": "доктор", "проф.": "професор"}
 LATIN_LOOKALIKES = str.maketrans("aceopxyjiABCEHKMOPTXY", "асеорхуйіАВСЕНКМОРТХУ")
 FILLERS = {"ъъ", "ъ", "ъм", "хм", "хмм", "ммм", "мм", "аха", "мхм", "ааа", "еее"}
+# "двама" and "2-ма", "първи" and "1-ви" must match: personal and ordinal numerals become plain digits on both sides
+PERSONAL = {"двама": 2, "трима": 3, "четирима": 4, "петима": 5, "шестима": 6, "седмина": 7, "осмина": 8,
+            "деветима": 9, "десетима": 10}
+ORDINAL_STEMS = {"първ": 1, "втор": 2, "трет": 3, "четвърт": 4, "пет": 5, "шест": 6, "седм": 7, "осм": 8,
+                 "девет": 9, "десет": 10}
+ORDINAL_ENDINGS = ("и", "а", "о", "ия", "ият", "ата", "ото", "ите")
+ORDINALS = {stem + end: n for stem, n in ORDINAL_STEMS.items() for end in ORDINAL_ENDINGS}
+ORDINALS.pop("пето", None)  # keep the ordinal set unambiguous with cardinals: "пети"/"пета" stay ordinals
 
 
 def _can_extend(current: int, value: int) -> bool:
@@ -72,11 +80,14 @@ def normalize(text: str, clean: bool = False) -> list[str]:
     for short, full in {**CONTRACTIONS, **ABBREVIATIONS}.items():
         text = text.replace(short, full)
     text = re.sub(r"\bш'(?=\w)", "ще ", text)
+    text = text.replace("%", " процента ")
+    text = re.sub(r"(\d+)\s?-\s?(ви|ри|ти|ми|ия|ият|ата|ото|та|то|и|ма)\b", r"\1", text)  # 1-ви, 18-и, 2-ма
     tokens = []
     for raw in text.split():
         if clean and re.search(r"\w-[^\w]*$", raw):  # cut-off word like "седе-"
             continue
         tokens += re.sub(r"[^\w]", " ", raw).split()
+    tokens = [str(PERSONAL.get(t, ORDINALS.get(t, t))) for t in tokens]
     tokens = _join_numbers(tokens)
     tokens = [d for t in tokens for d in (list(t) if t.isdigit() else [t])]
     if clean:
@@ -98,9 +109,49 @@ def edit_distance(ref: list, hyp: list) -> int:
     return d[len(hyp)]
 
 
+def error_types(ref: list, hyp: list) -> tuple[int, int, int]:
+    """(substitutions, deletions, insertions) of one optimal alignment."""
+    n, m = len(ref), len(hyp)
+    d = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        d[i][0] = i
+    for j in range(m + 1):
+        d[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (ref[i - 1] != hyp[j - 1]))
+    sub = dele = ins = 0
+    i, j = n, m
+    while i or j:
+        if i and j and d[i][j] == d[i - 1][j - 1] + (ref[i - 1] != hyp[j - 1]):
+            sub += ref[i - 1] != hyp[j - 1]
+            i, j = i - 1, j - 1
+        elif i and d[i][j] == d[i - 1][j] + 1:
+            dele, i = dele + 1, i - 1
+        else:
+            ins, j = ins + 1, j - 1
+    return sub, dele, ins
+
+
 def counts(ref_text: str, hyp_text: str, clean: bool) -> dict:
     """Raw error counts, so results can be summed over many files before dividing."""
     ref, hyp = normalize(ref_text, clean), normalize(hyp_text, clean)
     ref_chars, hyp_chars = list(" ".join(ref)), list(" ".join(hyp))
-    return {"word_errors": edit_distance(ref, hyp), "words": len(ref),
+    sub, dele, ins = error_types(ref, hyp)
+    return {"word_errors": sub + dele + ins, "words": len(ref), "sub": sub, "del": dele, "ins": ins,
             "char_errors": edit_distance(ref_chars, hyp_chars), "chars": len(ref_chars)}
+
+
+def cp_counts(ref_by_speaker: dict[str, str], hyp_by_speaker: dict[str, str], clean: bool = True) -> dict:
+    """Speaker-attributed errors (cpWER): each hypothesis speaker is paired with at most one reference speaker so that
+    total errors are minimal; words given to the wrong person or to an extra speaker count as errors."""
+    from scipy.optimize import linear_sum_assignment
+
+    refs = [normalize(t, clean) for t in ref_by_speaker.values()]
+    hyps = [normalize(t, clean) for t in hyp_by_speaker.values()]
+    size = max(len(refs), len(hyps))
+    refs += [[]] * (size - len(refs))
+    hyps += [[]] * (size - len(hyps))
+    cost = [[edit_distance(r, h) for h in hyps] for r in refs]
+    rows, cols = linear_sum_assignment(cost)
+    return {"word_errors": int(sum(cost[r][c] for r, c in zip(rows, cols))), "words": sum(len(r) for r in refs)}

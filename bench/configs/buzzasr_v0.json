@@ -1,0 +1,1 @@
+{"name": "buzzasr_v0", "asr": {"model": "buzzasr", "opts": {"beam_size": 5}}, "route": false}

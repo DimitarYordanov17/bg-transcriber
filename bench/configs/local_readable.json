@@ -1,0 +1,1 @@
+{"name": "local_readable", "asr": {"model": "large-v3", "opts": {"beam_size": 5}}, "rescue": true, "drop_unvoiced": 30.0, "smooth_flips": true, "others": ["buzzasr_v0", "canary_v2", "parakeet_v3", "whisper_turbo"], "rewrite": {"llm": "bggpt-27b"}, "polish": {"llm": "bggpt-27b", "style": "readable"}, "clean": true}

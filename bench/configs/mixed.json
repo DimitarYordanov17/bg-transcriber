@@ -1,0 +1,1 @@
+{"name": "mixed", "words_from": "elevenlabs", "asr": {"model": "large-v3", "opts": {"beam_size": 5}}, "drop_unvoiced": 30.0, "smooth_flips": true, "others": ["whisper_v0", "buzzasr_v0", "canary_v2", "parakeet_v3", "whisper_turbo"], "rewrite": {"llm": "bggpt-27b", "passes": 1, "outlier_sim": 0, "repair": false}, "polish": {"llm": "bggpt-27b", "style": "verbatim"}, "clean": true}

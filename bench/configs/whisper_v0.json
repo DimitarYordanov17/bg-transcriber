@@ -1,0 +1,1 @@
+{"name": "whisper_v0", "asr": {"model": "large-v3", "opts": {"beam_size": 5}}, "route": false}
